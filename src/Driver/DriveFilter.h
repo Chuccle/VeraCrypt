@@ -17,12 +17,21 @@
 #include "Boot/Windows/BootCommon.h"
 #include "EncryptedIoQueue.h"
 
+#define POWER_STATE_NORMAL          0x00
+#define POWER_STATE_QUERY_PENDING   0x01
+#define POWER_STATE_TRANSITIONING   0x02
+#define POWER_STATE_SUSPENDED       0x04
+
 typedef struct _DriveFilterExtension
 {
-	BOOL bRootDevice;
-	BOOL IsVolumeDevice;
-	BOOL IsDriveFilterDevice;
-	BOOL IsVolumeFilterDevice;
+	BOOLEAN bRootDevice;
+	BOOLEAN IsVolumeDevice;
+	BOOLEAN IsDriveFilterDevice;
+	BOOLEAN IsVolumeFilterDevice;
+	BOOLEAN BootDrive;
+	BOOLEAN VolumeHeaderPresent;
+	BOOLEAN DriveMounted;
+	BOOLEAN HiddenSystem;
 	uint64 MagicNumber;
 
 	PDEVICE_OBJECT DeviceObject;
@@ -35,17 +44,15 @@ typedef struct _DriveFilterExtension
 	int64 ConfiguredEncryptedAreaStart;
 	int64 ConfiguredEncryptedAreaEnd;
 
+	LONG64 ActiveIoCount; // Atomic reference count of in flight Read/Write IO requests to provide additional context when vetoing device power state transitions
+	LONG PowerState;
+
 	uint32 VolumeHeaderSaltCrc32;
 	EncryptedIoQueue Queue;
-
-	BOOL BootDrive;
-	BOOL VolumeHeaderPresent;
-	BOOL DriveMounted;
 
 	KEVENT MountWorkItemCompletedEvent;
 
 	CRYPTO_INFO *HeaderCryptoInfo;
-	BOOL HiddenSystem;
 
 } DriveFilterExtension;
 

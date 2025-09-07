@@ -995,17 +995,38 @@ static NTSTATUS DispatchPower (PDEVICE_OBJECT DeviceObject, PIRP Irp, DriveFilte
 	{
 		// Veto power state changes on mounted drives 
 		case IRP_MN_QUERY_POWER:
-		case IRP_MN_SET_POWER:
 		{
 			if (irpSp->Parameters.Power.Type == DevicePowerState)
 			{
 				DEVICE_POWER_STATE requestedState = irpSp->Parameters.Power.State.DeviceState;
 
-				// Is this too broad?
 				if (requestedState > PowerDeviceD0 && Extension->DriveMounted)
 				{
-					IoReleaseRemoveLock(&Extension->Queue.RemoveLock, Irp);
-					return TCCompleteIrp(Irp, STATUS_UNSUCCESSFUL, 0);
+                    // Atomically try to enter QUERY_PENDING state
+					LONG oldState = InterlockedCompareExchange(
+						&Extension->PowerState,
+						POWER_STATE_QUERY_PENDING,
+						POWER_STATE_NORMAL
+					);
+
+					if (oldState != POWER_STATE_NORMAL)
+					{
+						// Already in a power transition - veto
+						IoReleaseRemoveLock(&Extension->Queue.RemoveLock, Irp);
+						return TCCompleteIrp(Irp, STATUS_UNSUCCESSFUL, 0);
+					}
+
+					// Now safely check ActiveIoCount - no new I/O can start
+					if (InterlockedCompareExchange64(&Extension->ActiveIoCount, 0, 0) > 0)
+					{
+						// Active I/O present - revert state and veto
+						InterlockedExchange(&Extension->PowerState, POWER_STATE_NORMAL);
+						IoReleaseRemoveLock(&Extension->Queue.RemoveLock, Irp);
+						return TCCompleteIrp(Irp, STATUS_UNSUCCESSFUL, 0);
+					}
+
+					// Safe to proceed - transition to TRANSITIONING
+					InterlockedExchange(&Extension->PowerState, POWER_STATE_TRANSITIONING);
 				}
 			}
 		}
@@ -1063,6 +1084,21 @@ static NTSTATUS DispatchControl (PDEVICE_OBJECT DeviceObject, PIRP Irp, DriveFil
 	return status;
 }
 
+static NTSTATUS ReadWriteCompletionRoutine(
+	PDEVICE_OBJECT DeviceObject,
+	PIRP Irp,
+	PVOID Context
+)
+{
+	UNREFERENCED_PARAMETER(DeviceObject);
+	UNREFERENCED_PARAMETER(Irp);
+
+	DriveFilterExtension *Extension = (DriveFilterExtension *) Context;
+
+	InterlockedDecrement64 (&Extension->ActiveIoCount);
+
+	return STATUS_CONTINUE_COMPLETION; // STATUS_SUCCESS alias
+}
 
 NTSTATUS DriveFilterDispatchIrp (PDEVICE_OBJECT DeviceObject, PIRP Irp)
 {
@@ -1076,6 +1112,17 @@ NTSTATUS DriveFilterDispatchIrp (PDEVICE_OBJECT DeviceObject, PIRP Irp)
 	{
 	case IRP_MJ_READ:
 	case IRP_MJ_WRITE:
+		IoSetCompletionRoutine(
+			Irp,
+			ReadWriteCompletionRoutine,
+			Extension,
+			TRUE,
+			TRUE,
+			TRUE
+		);
+
+		InterlockedIncrement64 (&Extension->ActiveIoCount);
+		
 		if (Extension->BootDrive)
 		{
 			status = EncryptedIoQueueAddIrp (&Extension->Queue, Irp);
