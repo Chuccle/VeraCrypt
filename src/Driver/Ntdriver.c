@@ -3739,6 +3739,156 @@ NTSTATUS TCFsctlCall (PFILE_OBJECT fileObject, LONG IoControlCode,
 }
 
 
+// On successful call - dereference the returned DO once finished with it. 
+NTSTATUS GetTargetDeviceRelations(const PDEVICE_OBJECT DeviceObject, PDEVICE_OBJECT* TargetDeviceObject)
+{
+	NTSTATUS status;
+	IO_STATUS_BLOCK ioStatusBlock;
+	PIRP irp;
+	KEVENT completionEvent;
+	PDEVICE_RELATIONS deviceRelations = NULL;
+	PIO_STACK_LOCATION irpSp;
+
+	if (!DeviceObject || !TargetDeviceObject)
+	{
+		return STATUS_INVALID_PARAMETER;
+	}
+
+	*TargetDeviceObject = NULL;
+
+	ASSERT (KeGetCurrentIrql() <= APC_LEVEL);
+
+	KeInitializeEvent (&completionEvent, NotificationEvent, FALSE);
+	
+	irp = IoBuildSynchronousFsdRequest (IRP_MJ_PNP, DeviceObject, NULL, 0, NULL, &completionEvent, &ioStatusBlock);
+	
+	if (!irp)
+	{
+		return STATUS_INSUFFICIENT_RESOURCES;
+	}
+
+	irpSp = IoGetNextIrpStackLocation (irp);
+
+	irpSp->MinorFunction = IRP_MN_QUERY_DEVICE_RELATIONS;
+	irpSp->Parameters.QueryDeviceRelations.Type = TargetDeviceRelation;
+
+	ObReferenceObject (DeviceObject);
+	status = IoCallDriver (DeviceObject, irp);
+
+	if (status == STATUS_PENDING)
+	{
+		KeWaitForSingleObject (&completionEvent, Executive, KernelMode, FALSE, NULL);
+		status = ioStatusBlock.Status;
+	}
+
+	if (!NT_SUCCESS (status))
+	{
+		ObDereferenceObject (DeviceObject);
+		return status;
+	}
+
+	deviceRelations = (PDEVICE_RELATIONS)ioStatusBlock.Information;
+
+	if (deviceRelations)
+	{
+		if (deviceRelations->Count > 0)
+		{
+			*TargetDeviceObject = deviceRelations->Objects[0];
+			status = STATUS_SUCCESS;
+		}
+		else
+		{
+			status = STATUS_NOT_FOUND;
+		}
+
+		// cleanup the references and allocated buffer
+		for (ULONG i = 0; i < deviceRelations->Count; ++i)
+		{
+			ObDereferenceObject(deviceRelations->Objects[i]);
+		}
+			
+		ExFreePool (deviceRelations);
+	}
+
+	ObDereferenceObject (DeviceObject);
+	return status;
+}
+
+
+static REQUEST_POWER_COMPLETE PowerUpCompletion;
+
+
+static
+VOID
+PowerUpCompletion (
+	PDEVICE_OBJECT DeviceObject,
+	UCHAR MinorFunction,
+	POWER_STATE PowerState,
+	PVOID Context,
+	PIO_STATUS_BLOCK IoStatus
+)
+{
+	UNREFERENCED_PARAMETER(DeviceObject);
+	UNREFERENCED_PARAMETER(MinorFunction);
+	UNREFERENCED_PARAMETER(PowerState);
+	UNREFERENCED_PARAMETER(IoStatus);
+
+	if (!Context)
+	{
+		return;
+	}
+	
+	PKEVENT completionEvent = Context;
+	KeSetEvent (completionEvent, EVENT_INCREMENT, FALSE);
+}
+
+
+static NTSTATUS UsbPowerUp (PEXTENSION Extension)
+{
+	NTSTATUS ntStatus;
+	KEVENT PowerUpCompleteEvent;
+
+	ASSERT(KeAreApcsDisabled());
+
+	KeInitializeEvent (&PowerUpCompleteEvent, NotificationEvent, FALSE);
+
+	POWER_STATE powerState = { 0 };
+	powerState.DeviceState = PowerDeviceD0;
+
+	ObReferenceObject (Extension->pVolDevice);
+
+	ntStatus = PoRequestPowerIrp (
+		Extension->pVolDevice,
+		IRP_MN_SET_POWER,
+		powerState,
+		PowerUpCompletion,
+		&PowerUpCompleteEvent,
+		NULL);
+
+	if (!NT_SUCCESS (ntStatus))
+	{
+		Dump("Usb power up PoRequestPowerIrp failed with %x\n", ntStatus);
+		ObDereferenceObject (Extension->pVolDevice);
+		return ntStatus;
+	}
+
+	if (ntStatus == STATUS_PENDING)
+	{
+		LARGE_INTEGER timeout = RtlConvertLongToLargeInteger (-500 * 10000); // 500ms in 100ns units, negative for relative time
+		ntStatus = KeWaitForSingleObject (&PowerUpCompleteEvent, Executive, KernelMode, FALSE, &timeout);
+
+		if (ntStatus == STATUS_TIMEOUT)
+		{
+			Dump ("Usb power up timed out\n");
+		}
+	}
+
+	ObDereferenceObject (Extension->pVolDevice);
+	
+	return ntStatus;
+}
+
+
 NTSTATUS CreateDriveLink (int nDosDriveNo)
 {
 	WCHAR dev[128], link[128];
@@ -4143,6 +4293,16 @@ NTSTATUS UnmountDevice (UNMOUNT_STRUCT *unmountRequest, PDEVICE_OBJECT deviceObj
 	}
 
 	Dump ("UnmountDevice %d\n", extension->nDosDriveNo);
+
+	if (extension->HostBusType == BusTypeUsb && extension->HostRemovableMedia)
+	{
+		ntStatus = UsbPowerUp (extension);
+
+		if (!NT_SUCCESS (ntStatus) || ntStatus == STATUS_TIMEOUT)
+		{
+			return ERR_OS_ERROR;
+		}
+	}
 
 	ntStatus = TCOpenFsVolume (extension, &volumeHandle, &volumeFileObject);
 

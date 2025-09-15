@@ -110,6 +110,14 @@ NTSTATUS TCOpenVolume (PDEVICE_OBJECT DeviceObject,
 		if (!NT_SUCCESS(ntStatus))
 			goto error;
 
+		/* Get the Volume FDO for the file */
+		ntStatus = GetTargetDeviceRelations(Extension->pFsdDevice, &Extension->pVolDevice);
+
+		if (!NT_SUCCESS(ntStatus))
+		{
+			goto error;
+		}
+
 		dgBuffer = TCalloc(256);
 		if (!dgBuffer)
 		{
@@ -161,6 +169,19 @@ NTSTATUS TCOpenVolume (PDEVICE_OBJECT DeviceObject,
 		lDiskLength.QuadPart = dg.DiskSize.QuadPart;
 		Extension->HostBytesPerSector = dg.Geometry.BytesPerSector;
 		Extension->HostBytesPerPhysicalSector = dg.Geometry.BytesPerSector;
+
+		STORAGE_DEVICE_DESCRIPTOR deviceDesc = { 0 };
+
+		storagePropertyQuery.PropertyId = StorageDeviceProperty;
+		storagePropertyQuery.QueryType = PropertyStandardQuery;
+
+		if (NT_SUCCESS(TCSendHostDeviceIoControlRequestEx(DeviceObject, Extension, IOCTL_STORAGE_QUERY_PROPERTY,
+			(char*)&storagePropertyQuery, sizeof(storagePropertyQuery),
+			(char*)&deviceDesc, sizeof(deviceDesc))))
+		{
+			Extension->HostBusType = deviceDesc.BusType;
+			Extension->HostRemovableMedia = deviceDesc.RemovableMedia;
+		}
 
 		STORAGE_ACCESS_ALIGNMENT_DESCRIPTOR alignmentDesc = { 0 };
 		STORAGE_ADAPTER_DESCRIPTOR adapterDesc = { 0 };

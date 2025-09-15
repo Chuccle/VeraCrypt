@@ -50,6 +50,7 @@ typedef struct EXTENSION
 	HANDLE hDeviceFile;			/* Device handle for this device */
 	PFILE_OBJECT pfoDeviceFile;	/* Device fileobject for this device */
 	PDEVICE_OBJECT pFsdDevice;	/* lower level device handle */
+	PDEVICE_OBJECT pVolDevice;  /* device for the volume stack */
 
 	CRYPTO_INFO *cryptoInfo;	/* Cryptographic and other information for this device */
 
@@ -63,6 +64,8 @@ typedef struct EXTENSION
 
 	uint32 HostBytesPerSector;
 	uint32 HostBytesPerPhysicalSector;
+	STORAGE_BUS_TYPE HostBusType;
+	BOOL HostRemovableMedia;
 	ULONG HostMaximumTransferLength;
 	ULONG HostMaximumPhysicalPages;
 	ULONG HostAlignmentMask;
@@ -199,6 +202,7 @@ int64 GetElapsedTime (LARGE_INTEGER *lastPerfCounter);
 BOOL IsOSAtLeast (OSVersionEnum reqMinOS);
 PDEVICE_OBJECT GetVirtualVolumeDeviceObject (int driveNumber);
 void GetDriverRandomSeed (unsigned char* pbRandSeed, size_t cbRandSeed);
+NTSTATUS GetTargetDeviceRelations (const PDEVICE_OBJECT DeviceObject, PDEVICE_OBJECT* TargetDeviceObject);
 
 #define TC_BUG_CHECK(status) KeBugCheckEx (SECURITY_SYSTEM, __LINE__, (ULONG_PTR) status, 0, 'VC')
 
